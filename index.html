@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Multi-Exercise Tracker</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js and MoveNet model for pose estimation -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom styles for video feed mirroring */
+        .mirror {
+            transform: scaleX(-1);
+            -webkit-transform: scaleX(-1);
+        }
+        /* Style for disabled button */
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-5xl mx-auto text-center">
+        <h1 class="text-4xl md:text-5xl font-bold text-cyan-400 mb-2">AI Multi-Exercise Tracker</h1>
+        <p class="text-lg text-gray-300 mb-4">Select an exercise, start your camera, and begin your workout!</p>
+
+        <!-- Exercise Selection -->
+        <div class="mb-4">
+            <label for="exercise-select" class="text-lg mr-2 text-gray-300">Choose an exercise:</label>
+            <select id="exercise-select" class="bg-gray-700 text-white p-2 rounded-lg text-lg">
+                <option value="bicep_curl">Bicep Curl (Right)</option>
+                <option value="shoulder_press">Shoulder Press</option>
+                <option value="squat">Squat</option>
+                <option value="pushup">Pushup</option>
+            </select>
+        </div>
+
+        <!-- Main content area -->
+        <div class="relative w-full aspect-video bg-gray-800 rounded-2xl shadow-2xl overflow-hidden border-4 border-gray-700">
+            <!-- Video and Canvas elements are stacked here -->
+            <video id="webcam" class="absolute top-0 left-0 w-full h-full object-cover mirror" autoplay playsinline></video>
+            <canvas id="output" class="absolute top-0 left-0 w-full h-full mirror"></canvas>
+            <!-- Loading indicator -->
+            <div id="loading" class="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-80 z-10">
+                <div class="text-center">
+                    <svg class="animate-spin h-12 w-12 text-cyan-400 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p class="mt-4 text-lg">Initializing AI Model...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls and counters -->
+        <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+            <div class="bg-gray-800 p-6 rounded-2xl">
+                <h2 class="text-xl font-semibold text-gray-400 mb-2">Rep Count</h2>
+                <p id="rep-count" class="text-6xl font-bold text-cyan-400">0</p>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-2xl">
+                <h2 class="text-xl font-semibold text-gray-400 mb-2">Stage</h2>
+                <p id="stage" class="text-6xl font-bold text-white capitalize">Start</p>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-2xl flex flex-col justify-center">
+                <h2 class="text-xl font-semibold text-gray-400 mb-2">Instructions & Feedback</h2>
+                <p id="feedback" class="text-lg text-gray-300">Ready when you are!</p>
+            </div>
+        </div>
+        
+        <div class="mt-8 flex justify-center items-center gap-4">
+            <button id="start-btn" class="bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-8 rounded-lg text-xl transition-all duration-300 shadow-lg">
+                Start Camera
+            </button>
+            <button id="reset-btn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-lg text-xl transition-all duration-300 shadow-lg">
+                Reset
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output');
+        const canvasCtx = canvasElement.getContext('2d');
+        const repCountElement = document.getElementById('rep-count');
+        const stageElement = document.getElementById('stage');
+        const feedbackElement = document.getElementById('feedback');
+        const startBtn = document.getElementById('start-btn');
+        const loadingElement = document.getElementById('loading');
+        const exerciseSelect = document.getElementById('exercise-select');
+        const resetBtn = document.getElementById('reset-btn');
+
+        let detector;
+        let repCounter = 0;
+        let stage = 'start';
+        let isCameraOn = false;
+        let currentExercise = 'bicep_curl';
+
+        // Function to calculate angle between three points
+        function calculateAngle(a, b, c) {
+            const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+            let angle = Math.abs(radians * 180.0 / Math.PI);
+            if (angle > 180.0) {
+                angle = 360 - angle;
+            }
+            return angle;
+        }
+
+        // Exercise logic handlers
+        const exerciseHandlers = {
+            'bicep_curl': (keypoints) => {
+                feedbackElement.textContent = "Keep your right elbow visible.";
+                const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
+                const rightElbow = keypoints.find(k => k.name === 'right_elbow');
+                const rightWrist = keypoints.find(k => k.name === 'right_wrist');
+
+                if (rightShoulder?.score > 0.5 && rightElbow?.score > 0.5 && rightWrist?.score > 0.5) {
+                    const angle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+                    if (angle > 160) stage = 'down';
+                    if (angle < 45 && stage === 'down') {
+                        stage = 'up';
+                        repCounter++;
+                    }
+                }
+            },
+            'shoulder_press': (keypoints) => {
+                feedbackElement.textContent = "Keep both shoulders and elbows visible.";
+                const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
+                const rightElbow = keypoints.find(k => k.name === 'right_elbow');
+                const rightWrist = keypoints.find(k => k.name === 'right_wrist');
+                
+                if (rightShoulder?.score > 0.5 && rightElbow?.score > 0.5 && rightWrist?.score > 0.5) {
+                    const angle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+                    if (angle < 100) stage = 'down'; // Arms are down
+                    if (angle > 160 && stage === 'down') { // Arms are up
+                        stage = 'up';
+                        repCounter++;
+                    }
+                }
+            },
+            'squat': (keypoints) => {
+                feedbackElement.textContent = "Keep your full body in frame.";
+                const rightHip = keypoints.find(k => k.name === 'right_hip');
+                const rightKnee = keypoints.find(k => k.name === 'right_knee');
+                const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
+
+                if (rightHip?.score > 0.5 && rightKnee?.score > 0.5 && rightAnkle?.score > 0.5) {
+                    const angle = calculateAngle(rightHip, rightKnee, rightAnkle);
+                    if (angle > 165) stage = 'up'; // Standing straight
+                    if (angle < 90 && stage === 'up') { // Squatting down
+                        stage = 'down';
+                        repCounter++;
+                    }
+                }
+            },
+            'pushup': (keypoints) => {
+                 feedbackElement.textContent = "Position yourself sideways to the camera.";
+                const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
+                const rightElbow = keypoints.find(k => k.name === 'right_elbow');
+                const rightWrist = keypoints.find(k => k.name === 'right_wrist');
+
+                if (rightShoulder?.score > 0.5 && rightElbow?.score > 0.5 && rightWrist?.score > 0.5) {
+                    const angle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+                    if (angle > 160) stage = 'up'; // Arms extended
+                    if (angle < 90 && stage === 'up') { // Bent arms
+                        stage = 'down';
+                        repCounter++;
+                    }
+                }
+            }
+        };
+
+        async function runPoseDetection() {
+            if (detector && isCameraOn) {
+                const poses = await detector.estimatePoses(videoElement, { flipHorizontal: false });
+
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+                if (poses.length > 0) {
+                    const keypoints = poses[0].keypoints;
+                    
+                    // Run the logic for the currently selected exercise
+                    exerciseHandlers[currentExercise](keypoints);
+
+                    // Update UI
+                    repCountElement.textContent = repCounter;
+                    stageElement.textContent = stage;
+                    
+                    drawSkeleton(keypoints);
+                }
+            }
+            requestAnimationFrame(runPoseDetection);
+        }
+
+        function drawSkeleton(keypoints) {
+            const adjacentKeyPoints = poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet);
+            
+            adjacentKeyPoints.forEach((pair) => {
+                const [i, j] = pair;
+                const kp1 = keypoints[i];
+                const kp2 = keypoints[j];
+                
+                if (kp1.score > 0.5 && kp2.score > 0.5) {
+                    canvasCtx.beginPath();
+                    canvasCtx.moveTo(kp1.x, kp1.y);
+                    canvasCtx.lineTo(kp2.x, kp2.y);
+                    canvasCtx.strokeStyle = 'rgba(0, 255, 255, 0.7)';
+                    canvasCtx.lineWidth = 4;
+                    canvasCtx.stroke();
+                }
+            });
+
+            keypoints.forEach(kp => {
+                 if (kp.score > 0.5) {
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(kp.x, kp.y, 6, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                    canvasCtx.fill();
+                 }
+            });
+        }
+
+        async function init() {
+            loadingElement.style.display = 'flex';
+            const detectorConfig = { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING };
+            detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
+            loadingElement.style.display = 'none';
+            startBtn.disabled = false;
+        }
+        
+        startBtn.addEventListener('click', async () => {
+            if (!isCameraOn) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    videoElement.srcObject = stream;
+                    videoElement.style.display = 'block'; // Ensure video is visible
+                    videoElement.addEventListener('loadeddata', () => {
+                        isCameraOn = true;
+                        exerciseSelect.disabled = true; // Disable selection while camera is on
+                        startBtn.textContent = 'Stop Camera';
+                        runPoseDetection();
+                    });
+                } catch (err) {
+                    console.error("Error accessing webcam: ", err);
+                    feedbackElement.textContent = "Error: Camera access denied.";
+                }
+            } else {
+                const stream = videoElement.srcObject;
+                stream.getTracks().forEach(track => track.stop());
+                videoElement.srcObject = null;
+                videoElement.style.display = 'none'; // Hide video element
+                isCameraOn = false;
+                exerciseSelect.disabled = false; // Re-enable selection
+                startBtn.textContent = 'Start Camera';
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            }
+        });
+
+        exerciseSelect.addEventListener('change', (e) => {
+            currentExercise = e.target.value;
+            repCounter = 0; // Reset counter on exercise change
+            stage = 'start';
+            repCountElement.textContent = repCounter;
+            stageElement.textContent = stage;
+        });
+
+        resetBtn.addEventListener('click', () => {
+            repCounter = 0;
+            stage = 'start';
+            repCountElement.textContent = repCounter;
+            stageElement.textContent = stage;
+            feedbackElement.textContent = "Counter has been reset.";
+        });
+
+        startBtn.disabled = true;
+        init();
+    </script>
+</body>
+</html>
+
+
